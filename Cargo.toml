@@ -1,0 +1,9 @@
+[package]
+name = "watch-and-rerun"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.8", features = ["derive"] }
+notify = "6.1.1"
+notify-debouncer-mini = "0.4.1"
