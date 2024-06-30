@@ -49,6 +49,7 @@ fn main() {
         child_handle = Some(std::process::Command::new(&binary_path).spawn().unwrap());
 
         receiver.recv().unwrap();
+        while receiver.try_recv().is_ok() {}
         println!("Change detected, re-running...");
     }
 }
