@@ -1,7 +1,17 @@
 use clap::Parser;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
-use std::{env::current_dir, path::PathBuf, process::Child, sync::mpsc::channel, time::Duration};
+use std::{
+    env::current_dir,
+    path::PathBuf,
+    process::Child,
+    sync::{
+        atomic::AtomicBool,
+        mpsc::{channel, Sender},
+        Arc,
+    },
+    time::Duration,
+};
 
 #[derive(Parser)]
 #[command(name = "WatchAndRerun")]
@@ -30,9 +40,12 @@ fn main() {
         None => binary_path.parent().unwrap().to_path_buf(),
     };
 
-    let (sender, receiver) = channel::<()>();
-    let mut debouncer = new_debouncer(debounce_ms, move |_res: DebounceEventResult| {
-        sender.send(()).unwrap();
+    let (sender, receiver) = channel::<Event>();
+    let mut debouncer = new_debouncer(debounce_ms, {
+        let sender = sender.clone();
+        move |_res: DebounceEventResult| {
+            sender.send(Event::FileChanged).unwrap();
+        }
     })
     .unwrap();
 
@@ -42,14 +55,53 @@ fn main() {
         .unwrap();
 
     let mut child_handle: Option<Child> = None;
+    let mut timeout_handle: Option<TimeoutHandle> = None;
+    sender.send(Event::Timeout).unwrap();
     loop {
-        if let Some(child_handle) = child_handle.as_mut() {
-            child_handle.kill().unwrap();
+        match receiver.recv().unwrap() {
+            Event::FileChanged => {
+                if let Some(timeout_handle) = timeout_handle.as_mut() {
+                    timeout_handle.abort();
+                }
+                timeout_handle = Some(timeout(sender.clone(), debounce_ms));
+            }
+            Event::Timeout => {
+                if let Some(child_handle) = child_handle.as_mut() {
+                    child_handle.kill().unwrap();
+                }
+                child_handle = Some(std::process::Command::new(&binary_path).spawn().unwrap());
+                println!("Change detected, re-running...");
+            }
         }
-        child_handle = Some(std::process::Command::new(&binary_path).spawn().unwrap());
+    }
+}
 
-        receiver.recv().unwrap();
-        while receiver.try_recv().is_ok() {}
-        println!("Change detected, re-running...");
+enum Event {
+    FileChanged,
+    Timeout,
+}
+
+fn timeout(sender: Sender<Event>, duration: Duration) -> TimeoutHandle {
+    let aborted = Arc::new(AtomicBool::new(false));
+    let _ = std::thread::spawn({
+        let aborted = aborted.clone();
+        move || {
+            std::thread::sleep(duration);
+            if aborted.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            sender.send(Event::Timeout).unwrap();
+        }
+    });
+    TimeoutHandle { aborted }
+}
+
+struct TimeoutHandle {
+    aborted: Arc<AtomicBool>,
+}
+impl TimeoutHandle {
+    fn abort(&self) {
+        self.aborted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
